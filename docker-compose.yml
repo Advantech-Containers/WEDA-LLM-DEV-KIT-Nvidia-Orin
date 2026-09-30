@@ -1,0 +1,186 @@
+# ==============================================================================
+# WEDA LLM Suite (JetPack 6 / Orin) — Docker Compose
+#
+#   docker compose up weda-llm                # generation server only
+#   docker compose --profile rag up           # + embedding server (RAG)
+# Open WebUI (:3000) is part of the DEFAULT stack, as in the jp7 llm_demo.
+#
+# The two servers are separate services so compose owns restart/signal
+# semantics; the entrypoint never supervises more than one process.
+# ==============================================================================
+name: weda-llm-suite
+
+x-weda-common: &weda-common
+  # Run the prebuilt registry image; all app files (config, scripts,
+  # entrypoint, sample docs) are MOUNTED read-only below -- edit on the host,
+  # restart the service (same operating model as the jp7 llm_demo's default
+  # Option B). The bundle also ships an OPTIONAL Dockerfile that bakes the same
+  # tree in, for air-gapped fleets and for CI; point WEDA_LLM_IMAGE at that
+  # build and these mounts shadow it like-for-like.
+  image: ${WEDA_LLM_IMAGE}
+  #uncomment to force the locally loaded image, never the registry
+  #pull_policy: never
+  # survives a device reboot and an OOM kill; config errors do not loop
+  # because the supervisor idles instead of exiting on a failed swap
+  restart: unless-stopped
+  runtime: nvidia
+  # privileged: serve.py writes /proc/sys/vm/drop_caches before loading a
+  # model -- on 8 GB unified memory a stale page cache is the difference
+  # between loading and OOM. Same posture as the jp7 llm_demo.
+  privileged: true
+  ipc: host
+  network_mode: host
+  # get_device_stats's process list needs to see llama-server (weda-llm) from
+  # inside weda-gateway -- without this each service has its own PID
+  # namespace, so `ps` only ever sees its own container, even though
+  # /proc/stat and /proc/meminfo already report the whole host regardless.
+  pid: host
+  # the fit gate's headroom reclaim reads the OTHER containers' memory
+  # cgroups; the default private cgroup namespace hides them (a container
+  # sees only its own subtree, privileged or not)
+  cgroup: host
+  entrypoint: [ "/wise-edge/app/entrypoint.sh" ]
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [ gpu, utility, compute ]
+  volumes:
+    - /etc/localtime:/etc/localtime:ro
+    # nvpmodel is a host OS tool (l4t-tools), not shipped in this image --
+    # bind-mount the binary and its mode definitions so get_power_modes /
+    # set_power_mode can call the real thing instead of erroring "not found".
+    - /usr/sbin/nvpmodel:/usr/sbin/nvpmodel:ro
+    # /etc/nvpmodel.conf is a symlink into /etc/nvpmodel/ on JetPack 6 --
+    # the directory must come along or the link dangles inside the container
+    - /etc/nvpmodel.conf:/etc/nvpmodel.conf:ro
+    - /etc/nvpmodel:/etc/nvpmodel:ro
+    # nvpmodel keeps the CURRENT mode in /var/lib/nvpmodel; unless it is
+    # shared, a container-side -m writes a private copy and container and
+    # host disagree about the active mode
+    - /var/lib/nvpmodel:/var/lib/nvpmodel:rw
+    # read-only host container logs so explain_recent_errors can read the
+    # stack's OWN logs (filtered by cgroup identity, never other containers')
+    - /var/lib/docker/containers:/host/docker-logs:ro
+    # read-only container introspection (list/inspect/stats) via the Engine
+    # API; the agent issues only GET verbs -- no start/stop tool exists
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./config:/wise-edge/app/config:ro
+    - ./scripts:/wise-edge/app/scripts:ro
+    - ./entrypoint.sh:/wise-edge/app/entrypoint.sh:ro
+    # ONE conventioned docs mount: point DOCS_DIR (.env) at any host corpus;
+    # applications reference paths RELATIVE to it (docs_dir key), so a new
+    # corpus never needs a compose edit. Default = the bundled sample notes.
+    - ${DOCS_DIR:-./docs_sample}:/wise-edge/app/docs:ro
+    - ${HF_CACHE:-./model_cache/huggingface}:/models/huggingface:rw
+    - rag-store:/wise-edge/app/rag_store:rw
+    - ${TEST_LOGS_DIR:-./test_logs}:/wise-edge/app/test_logs:rw
+  working_dir: /wise-edge/app
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "${LOG_MAX_SIZE:-20m}"
+      max-file: "${LOG_MAX_FILE:-3}"
+
+services:
+  weda-llm:
+    <<: *weda-common
+    container_name: ${WEDA_LLM_CONTAINER_NAME:-weda-llm-suite}
+    # under memory pressure the kernel kills the largest process -- the model
+    # server. Bias it toward the convenience frontend instead (see open-webui).
+    oom_score_adj: -500
+    environment:
+      # a variable reaches the container only if it is listed here -- .env
+      # alone is compose interpolation, not container env.
+      - WEDA_LLM_PORT=${WEDA_LLM_PORT:-9000}
+      - WEDA_LLM_HOST=${WEDA_LLM_HOST:-127.0.0.1}
+      - WEDA_EMBED_PORT=${WEDA_EMBED_PORT:-9001}
+      - LLM_PROFILE=${LLM_PROFILE:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      # identifies our outbound requests and silences langchain_community's
+      # "USER_AGENT not set" nag (cosmetic; nothing depends on it)
+      - USER_AGENT=${USER_AGENT:-weda-llm-suite}
+      # UTF-8 file I/O regardless of process locale -- a library that calls
+      # setlocale() mid-process must not flip text reads to ascii
+      - PYTHONUTF8=1
+    tty: true
+    stdin_open: true
+    command:
+      - serve
+
+  weda-embed:
+    <<: *weda-common
+    profiles: [ "rag" ]
+    container_name: ${WEDA_LLM_CONTAINER_NAME:-weda-llm-suite}-embed
+    environment:
+      - WEDA_LLM_HOST=${WEDA_LLM_HOST:-127.0.0.1}
+      - WEDA_EMBED_PORT=${WEDA_EMBED_PORT:-9001}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - PYTHONUTF8=1
+    command:
+      - embed
+
+  weda-gateway:
+    <<: *weda-common
+    container_name: ${WEDA_LLM_CONTAINER_NAME:-weda-llm-suite}-gateway
+    environment:
+      - WEDA_LLM_PORT=${WEDA_LLM_PORT:-9000}
+      - WEDA_LLM_HOST=${WEDA_LLM_HOST:-127.0.0.1}
+      - WEDA_EMBED_PORT=${WEDA_EMBED_PORT:-9001}
+      - WEDA_GATEWAY_PORT=${WEDA_GATEWAY_PORT:-9002}
+      - WEDA_GATEWAY_ALLOWED_ORIGINS=${WEDA_GATEWAY_ALLOWED_ORIGINS:-}
+      # silences langchain_community's USER_AGENT nag in the verified-RAG path
+      - USER_AGENT=${USER_AGENT:-weda-llm-suite}
+      - PYTHONUTF8=1
+    command:
+      - gateway
+
+  open-webui:
+    # version-pinned: a mutable tag would silently change the UI under
+    # deployed devices between pulls
+    image: ghcr.io/open-webui/open-webui:v0.11.0
+    container_name: open-webui
+    restart: always
+    # first candidate for the OOM-killer: it restarts on its own, the model
+    # server's loss costs a reload and every in-flight conversation
+    oom_score_adj: 500
+    network_mode: host
+    environment:
+      - PORT=3000
+      # The UI talks to the APPLICATION GATEWAY: every app appears as a model
+      # in the dropdown (chat / docs-qa / device-assistant / ...).
+      - OPENAI_API_BASE_URL=http://127.0.0.1:${WEDA_GATEWAY_PORT:-9002}/v1
+      - OPENAI_API_KEY=empty
+      # no Ollama in this stack: stops the probe that logs a connection
+      # ERROR on every model-list refresh
+      - ENABLE_OLLAMA_API=false
+      # background tasks (title, tags, follow-ups) go to the plain chat app:
+      # on an agent app each would run a full tool loop and queue behind the
+      # user's own request on a single slot
+      - TASK_MODEL_EXTERNAL=chat
+      # socket.io validates the Origin header against this list on EVERY
+      # connection (even same-origin), so a fixed value must name the origin
+      # browsers actually use -- which is deployment-specific. Default '*'
+      # works everywhere; to harden, set CORS_ALLOW_ORIGIN in .env to your
+      # device's real origin (e.g. http://192.168.1.20:3000).
+      - CORS_ALLOW_ORIGIN=${CORS_ALLOW_ORIGIN:-*}
+      - WEBUI_AUTH=True
+      - ENABLE_SIGNUP=True
+      # the first account becomes admin; later signups wait for admin
+      # approval -- on a host-network port anyone on the LAN can reach,
+      # auto-activating every signup would hand out access silently
+      - DEFAULT_USER_ROLE=pending
+      - ENABLE_PERSISTENT_CONFIG=False
+      - BYPASS_MODEL_ACCESS_CONTROL=True
+    volumes:
+      - open-webui:/app/backend/data
+
+volumes:
+  rag-store:
+    name: weda-llm-suite-rag-store
+  open-webui:
+    name: weda-llm-suite-open-webui-data

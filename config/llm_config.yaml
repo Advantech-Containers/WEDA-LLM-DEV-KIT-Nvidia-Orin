@@ -1,0 +1,325 @@
+# ==============================================================================
+# WEDA LLM Suite (Orin, 8 GB unified memory) — model profiles
+#
+# One file drives every mode. Select with:  ./build.sh -p <profile>
+# llama.cpp/GGUF shapes, NOT vLLM shapes: this device serves through
+# llama-server (C++, tool-calls + embeddings) or llama_cpp.server (python).
+# ==============================================================================
+model_cache_dir: "/models/huggingface"
+default_profile: qwen3-4b-q4km
+
+# Every repo reference is pinned to a revision: a repo's main branch can be
+# updated or force-pushed, so two devices provisioned weeks apart would
+# otherwise serve different bytes under one profile name. Re-pin by replacing
+# the revision with the commit you verified.
+profiles:
+
+  # ── Primary: tool-calling capable daily driver ───────────────────────────────
+  # backend llamacpp = the C++ llama-server in weda-llm-base >=1.0.0-orin.
+  # It parses the model's native chat template (--jinja) into OpenAI
+  # tool_calls -- required by agent applications -- and serves parallel slots.
+  qwen3-4b-q4km:
+    backend: llamacpp
+    hf_repo: Qwen/Qwen3-4B-GGUF
+    revision: bc640142c66e1fdd12af0bd68f40445458f3869b
+    gguf_file: Qwen3-4B-Q4_K_M.gguf          # 2.33 GiB
+    # Context window, single slot, q8_0 KV. Memory cost scales with n_ctx:
+    #   8192  -> ~0.6 GiB KV   default: long conversations with headroom to
+    #                          spare on 8 GB (measured: 16k left ~80 MB free
+    #                          and paged under load)
+    #   16384 -> ~1.2 GiB KV   toggle for very long documents/sessions; run
+    #                          ./app.sh check first and expect less headroom
+    #   32768                  the model's native max -- ceiling, not advised
+    # Beyond the window the gateway drops the oldest turns, so a smaller
+    # n_ctx never breaks a conversation; it shortens its memory. Saving this
+    # file hot-swaps the change.
+    n_ctx: 8192
+    n_gpu_layers: -1                          # all layers on GPU
+    parallel: 1
+    jinja: true
+    # Flash attention: pair it with any KV-cache work; standard llama.cpp
+    # guidance for CUDA devices and required before cache_type_* below.
+    flash_attn: true
+    # q8_0 KV halves cache memory at <0.1% quality loss -- required to hold
+    # a 16k window on 8 GB; f16 is faster only when it fits.
+    cache_type_k: q8_0
+    cache_type_v: q8_0
+    extra_serve_args: []
+
+  # ── Parity profile: llama_cpp.server backend ────────────────────────────────
+  # No tool_calls on the native-template path (llama-cpp-python limitation);
+  # agent applications refuse this backend. Kept for API parity and A/B
+  # debugging.
+  qwen3-4b-q4km-python:
+    backend: python
+    hf_repo: Qwen/Qwen3-4B-GGUF
+    revision: bc640142c66e1fdd12af0bd68f40445458f3869b
+    gguf_file: Qwen3-4B-Q4_K_M.gguf
+    n_ctx: 4096
+    n_gpu_layers: -1
+    extra_serve_args: []
+
+  # ── Small sanity / low-memory headroom profile ───────────────────────────────
+  qwen3-1.7b-q4km-sanity:
+    backend: llamacpp
+    # official Qwen repo ships only Q8_0 for 1.7B; Q4_K_M comes from unsloth
+    hf_repo: unsloth/Qwen3-1.7B-GGUF
+    revision: d7f544eead698dbd1f15126ef60b45a1e1933222
+    gguf_file: Qwen3-1.7B-Q4_K_M.gguf         # ~1.0 GiB
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 2
+    jinja: true
+    # 1.7B echoes tool schemas as text instead of emitting tool_calls --
+    # agent apps are hidden while this profile is served
+    tool_calls: false
+    flash_attn: true
+    extra_serve_args: []
+
+  # ── Current-generation roster (ungated repos, exact upstream filenames) ─────
+  # 2026 architectures (Qwen3.5 / Gemma 4 / Nemotron 3) load on the llamacpp
+  # backend only: the python backend's vendored llama.cpp predates them and
+  # fails with "unknown model architecture".
+  llama3.2-3b-q4km:
+    backend: llamacpp
+    hf_repo: bartowski/Llama-3.2-3B-Instruct-GGUF
+    revision: 5ab33fa94d1d04e903623ae72c95d1696f09f9e8
+    gguf_file: Llama-3.2-3B-Instruct-Q4_K_M.gguf     # 2.0 GiB; tool-capable
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 2
+    jinja: true
+    flash_attn: true
+
+  qwen3.5-4b-q4km:
+    backend: llamacpp
+    hf_repo: unsloth/Qwen3.5-4B-GGUF
+    revision: e87f176479d0855a907a41277aca2f8ee7a09523
+    gguf_file: Qwen3.5-4B-Q4_K_M.gguf                # 2.55 GiB; tool-capable
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 2
+    jinja: true
+    flash_attn: true
+
+  phi4-mini-q4km:
+    backend: llamacpp
+    hf_repo: bartowski/microsoft_Phi-4-mini-instruct-GGUF
+    revision: 7ff82c2aaa4dde30121698a973765f39be5288c0
+    gguf_file: microsoft_Phi-4-mini-instruct-Q4_K_M.gguf   # 2.32 GiB; MIT; function calling
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 2
+    jinja: true
+    flash_attn: true
+
+  nemotron3-nano-4b-q4km:
+    backend: llamacpp
+    hf_repo: unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF
+    revision: 8e81be55c5aa3d63bb82b6ceec62d50805d9e1bb
+    gguf_file: NVIDIA-Nemotron-3-Nano-4B-Q4_K_M.gguf # 2.70 GiB; run the agent
+    n_ctx: 2048                                      # 4096 does not pass the fit gate on 8 GB
+    n_gpu_layers: -1
+    # hybrid Mamba/attention arch (nemotron_h): KV footprint does not follow
+    # transformer math -- single slot until measured on the device
+    parallel: 1
+    jinja: true
+    flash_attn: true
+
+  smollm3-3b-q4km:
+    backend: llamacpp
+    hf_repo: unsloth/SmolLM3-3B-GGUF
+    revision: a7bc17204c8a326d6bd6e466e076959eddae2025
+    gguf_file: SmolLM3-3B-Q4_K_M.gguf                # 1.78 GiB; light tier
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 2
+    jinja: true
+    flash_attn: true
+
+  # Ceiling profile: 4.64 GiB weights, above the comfortable ~4.5 GiB line --
+  # single slot + q8_0 KV to fit. The Gemma 4 template declares tool handling,
+  # but agent use stays unverified until the runtime preflight passes.
+  gemma4-e4b-q4km:
+    backend: llamacpp
+    hf_repo: unsloth/gemma-4-E4B-it-GGUF
+    revision: bfc15c382204943c3a8fff0c750b94ae2364d7a3
+    gguf_file: gemma-4-E4B-it-Q4_K_M.gguf
+    n_ctx: 4096
+    n_gpu_layers: -1
+    parallel: 1
+    jinja: true
+    flash_attn: true
+    cache_type_k: q8_0
+    cache_type_v: q8_0
+
+# ── RAG embedding server (second llama-server process, ~90 MiB) ───────────────
+# 768-dim; paraphrase/unrelated cosine separation is wide enough for
+# retrieval on this hardware.
+embedding:
+  hf_repo: nomic-ai/nomic-embed-text-v1.5-GGUF
+  revision: 0188c9bf409793f810680a5a431e7b899c46104c
+  gguf_file: nomic-embed-text-v1.5.Q4_K_M.gguf
+  pooling: mean
+  # nomic v1.5 supports 8192 (RoPE-scaled); batch sizes follow n_ctx in
+  # serve.py, so this is also the largest embeddable input
+  n_ctx: 8192
+  n_gpu_layers: -1
+
+# ── Operations monitoring (optional) -- the recorder's cadence and the alert
+# thresholds. Absent keys use built-in defaults; remove the block to accept
+# all defaults.
+monitoring:
+  interval_sec: 30
+  thresholds:
+    temp_c: 85.0
+    mem_used_pct: 92.0
+    swap_used_pct: 80.0
+    disk_free_gb_min: 2.0
+
+# ── RAG defaults (every rag/agent+rag application may override per key) ───────
+rag:
+  collection: weda_docs
+  chunk_chars: 800
+  chunk_overlap: 120
+  top_k: 4
+  # retrieval pipeline: dense + BM25 keyword search fused by reciprocal rank
+  # (exact part numbers, error codes and names survive), then an optional
+  # cross-encoder rerank of the fused candidates (rerank: true per app; needs
+  # the reranker model below in the cache).
+  hybrid: true
+  rerank: false
+
+# cross-encoder for rerank: true (~90 MB, CPU, ~0.5-1 s per question). Cached
+# by download_models.py like the GGUFs; never downloaded by a container.
+reranker:
+  hf_repo: cross-encoder/ms-marco-MiniLM-L-6-v2
+  revision: 233902d25c440f23af6f7d6e94d2946bac0bee0a
+
+# ==============================================================================
+# APPLICATIONS — run with:  ./app.sh <name>
+#
+# An application is a YAML block: kind (chat|agent|rag|rag-verified), the serving profile it
+# expects, a prompt, tool selection, retrieval knobs, endpoints. Creating a new
+# assistant = copying a block. Config SELECTS behaviour; it cannot define new
+# tools or kinds -- those are code (scripts/, deliberately: config is never
+# executed). app.sh never starts/stops servers -- build.sh owns lifecycle.
+# ==============================================================================
+applications:
+
+  # No profile key = the app FOLLOWS default_profile, so a hot swap (editing
+  # default_profile while serving) carries these apps with it automatically.
+  # Pin a profile only when the app truly requires that model (python-parity).
+  chat:
+    kind: chat
+    # reasoning off: on Orin the thinking phase costs 10-20 s before the
+    # first visible token; interactive chat values latency over deliberation
+    thinking: false
+    system_prompt: >
+      You are a helpful assistant running fully on an NVIDIA Jetson edge
+      device. Be concise.
+    sampling: {temperature: 0.7, top_p: 0.95}
+    examples:
+    - Explain unified memory on Jetson in two sentences.
+    - Draft a short shift-handover note for a factory line.
+
+  device-assistant:
+    kind: agent
+    thinking: false
+    system_prompt: >
+      You are an assistant on an NVIDIA Jetson edge device. Use the provided
+      tools when they help. You can both read device state and act on it
+      (change the power mode, free memory) -- call get_power_modes before
+      set_power_mode, and confirm with the user before changing the power
+      mode if the request is ambiguous. Report tool results exactly as
+      returned: never claim an action succeeded unless a tool result says so,
+      and never invent command output or device readings. Be concise.
+    tools: [get_device_stats, get_time, calculator, get_power_modes,
+            set_power_mode, free_memory, get_network_info,
+            get_telemetry_history, get_recent_alerts, get_action_history,
+            check_anomalies, remember_note, recall_notes,
+            explain_recent_errors, generate_report,
+            list_containers, inspect_container, container_stats]
+    sampling: {temperature: 0.4}
+    examples:
+    - How hot is the device right now?
+    - Is there enough free memory to start another workload?
+    - What is (2048 * 3) / 1.5?
+    - Switch to the max performance power mode.
+    - Free up some RAM before I start a large job.
+    - What endpoint should my application connect to?
+
+  docs-qa:
+    kind: rag
+    thinking: false
+    system_prompt: >
+      Answer the question using ONLY the provided context. If the context does
+      not contain the answer, say so plainly. Cite snippets as [n].
+    collection: weda_docs
+    top_k: 4
+    # relative to the DOCS_DIR mount (.env) -- '.' = the mount root itself
+    docs_dir: .
+    # low temperature: grounded answering, not creativity
+    sampling: {temperature: 0.2, top_p: 0.9}
+    examples:
+    - What serving stack does WISE-Edge use on JetPack 6 devices?
+    - How much memory does a 4B Q4_K_M model need?
+
+  # verified RAG: a LangGraph pipeline around the same store -- retrieve,
+  # grade the snippets, rewrite the query and retry when nothing relevant
+  # came back, answer with citations, then verify every claim against the
+  # context. 3-5 model calls per question (15-40 s on Orin): for answers
+  # that must be right, not for conversation.
+  docs-qa-verified:
+    kind: rag-verified
+    thinking: false
+    system_prompt: >
+      Answer the question using ONLY the provided context. If the context does
+      not contain the answer, say so plainly. Cite snippets as [n].
+    collection: weda_docs
+    docs_dir: .
+    top_k: 4
+    rerank: true
+    verify_rounds: 1
+    sampling: {temperature: 0.1, top_p: 0.9}
+    examples:
+    - What serving stack does WISE-Edge use on JetPack 6 devices?
+    - Which memory limit applies to 4B models, and where is it stated?
+
+  # agent + rag combined: the agent can SEARCH the document store as a tool,
+  # deciding itself when retrieval helps. Needs the embedding server running
+  # (./build.sh --embed) AND an ingested collection (./app.sh docs-qa ingest).
+  device-assistant-rag:
+    kind: agent
+    thinking: false
+    system_prompt: >
+      You are an assistant on an NVIDIA Jetson edge device. You have live
+      device tools (including changing the power mode and freeing memory)
+      AND a search_documents tool over the local knowledge base. Search the
+      documents when a question concerns platform or site knowledge; use
+      device tools for live state or to act on the device. Cite document
+      snippets. Call get_power_modes before set_power_mode, and confirm with
+      the user before changing the power mode if the request is ambiguous.
+      Report tool results exactly as returned: never claim an action
+      succeeded unless a tool result says so, and never invent command
+      output or device readings.
+    tools: [get_device_stats, get_time, calculator, search_documents,
+            get_power_modes, set_power_mode, free_memory, get_network_info,
+            get_telemetry_history, get_recent_alerts, get_action_history,
+            check_anomalies, remember_note, recall_notes,
+            explain_recent_errors, generate_report,
+            list_containers, inspect_container, container_stats]
+    collection: weda_docs
+    top_k: 4
+    sampling: {temperature: 0.3}
+    examples:
+    - Check the docs for the memory guidance, then tell me if we currently comply.
+    - What does the platform overview say about port 9001?
+    - The docs say this workload needs max performance -- are we in that mode, and if not switch us.
+
+  python-parity:
+    kind: chat
+    profile: qwen3-4b-q4km-python
+    thinking: false
+    system_prompt: >
+      You are a helpful assistant. Be concise.
